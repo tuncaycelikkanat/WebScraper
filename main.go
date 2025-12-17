@@ -82,10 +82,12 @@ func fetchHTML(url string, outputPath string) error {
 
 func takeScreenShot(url string, outputPath string) error {
 
+	start := time.Now()
+
 	ctx, cancel := chromedp.NewContext(context.Background())
 	defer cancel()
 
-	ctx, cancel = context.WithTimeout(ctx, 20*time.Second)
+	ctx, cancel = context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	var buf []byte
@@ -95,8 +97,13 @@ func takeScreenShot(url string, outputPath string) error {
 	err := chromedp.Run(ctx,
 		chromedp.EmulateViewport(1920, 1080),
 		chromedp.Navigate(url),
+		chromedp.WaitReady("body"),
+		chromedp.Sleep(5*time.Second),
+		//chromedp.WaitVisible("body"),
+		chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight);`, nil),
 		chromedp.Sleep(3*time.Second),
 		chromedp.FullScreenshot(&buf, 90),
+		//chromedp.CaptureScreenshot(&buf),
 	)
 	if err != nil {
 		return err
@@ -107,7 +114,8 @@ func takeScreenShot(url string, outputPath string) error {
 		return err
 	}
 
-	fmt.Println("Screenshot Saved:", outputPath)
+	elapsed := time.Since(start)
+	fmt.Printf("Screenshot Saved: %s (in %s)\n", outputPath, elapsed)
 	return nil
 }
 
