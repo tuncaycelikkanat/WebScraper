@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,107 +16,162 @@ import (
 )
 
 func main() {
-
-	// CLI arg check
-	if len(os.Args) < 2 || len(os.Args) > 2 {
-		fmt.Printf("the program need 1 argument but %d found.\n", len(os.Args)-1)
-		fmt.Println("usage: go run main.go <url>")
+	if err := run(); err != nil {
+		log.Println("Program failed:", err)
 		os.Exit(1)
 	}
-
-	targetURL := os.Args[1] //Args[0] -> main.go , Args[1] -> targetURL
-	fmt.Println("Target URL:", targetURL)
-
-	// create output folder
-	outDir, childDirName, err := createOutputDirectory(targetURL)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	htmlPath := filepath.Join(outDir, childDirName+".html")
-	imgPath := filepath.Join(outDir, childDirName+".png")
-
-	// fetch html
-	err = fetchHTML(targetURL, htmlPath)
-	if err != nil {
-		log.Fatal("HTML Fetch Err:", err)
-	}
-
-	// screenshot
-	err = takeScreenShot(targetURL, imgPath)
-	if err != nil {
-		log.Fatal("Screenshot Err:", err)
-	}
-
-	fmt.Println("Successfully completed.")
 }
 
-func fetchHTML(url string, outputPath string) error {
+func run() error {
+
+	if len(os.Args) != 2 {
+		return fmt.Errorf("usage: go run main.go <url>")
+	}
+
+	targetURL := os.Args[1]
+
+	// url normalization
+	if !strings.HasPrefix(targetURL, "http://") &&
+		!strings.HasPrefix(targetURL, "https://") {
+		targetURL = "https://" + targetURL
+	}
+
+	fmt.Println("Target URL:", targetURL)
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	// output directory
+	outDir, childDirName, err := createOutputDirectory(targetURL)
+	if err != nil {
+		return err
+	}
+
+	// check fetchings
+	collyOK := false
+	chromeOK := false
+
+	defer func() {
+		if !collyOK && !chromeOK {
+			fmt.Println("Both Colly and Chromedp failed. There is no result saved.")
+			_ = os.RemoveAll(outDir)
+		}
+	}()
+
+	collyHTMLPath := filepath.Join(outDir, childDirName+"_colly.html")
+	chromeHTMLPath := filepath.Join(outDir, childDirName+"_chromedp.html")
+	imgPath := filepath.Join(outDir, childDirName+".png")
+
+	// colly part
+	fmt.Println("\n-> COLLY Trying To Fetch HTML")
+	if err := fetchHTMLWithColly(targetURL, collyHTMLPath); err != nil {
+		fmt.Println("Colly failed:", err)
+	} else {
+		collyOK = true
+	}
+
+	// chromedp part
+	fmt.Println("\n-> CHROMEDP Trying To Fetch HTML And Taking Screenshot")
+	if err := fetchWithChromedp(targetURL, chromeHTMLPath, imgPath, rng); err != nil {
+		fmt.Println("Chromedp failed:", err)
+	} else {
+		chromeOK = true
+	}
+
+	fmt.Println("\nResults:")
+	fmt.Println("Colly: ", collyOK)
+	fmt.Println("Chrome: ", chromeOK)
+
+	return nil
+}
+
+func fetchHTMLWithColly(targetURL, outputPath string) error {
 
 	c := colly.NewCollector(
 		colly.UserAgent(
 			"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "+
-				"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+				"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		),
 		colly.AllowURLRevisit(),
 	)
 
 	c.SetRequestTimeout(15 * time.Second)
 
+	c.Limit(&colly.LimitRule{
+		DomainGlob:  "*",
+		Delay:       2 * time.Second,
+		RandomDelay: 1 * time.Second,
+	})
+
 	c.OnRequest(func(r *colly.Request) {
-		fmt.Println("Fetching HTML:", r.URL.String())
+		r.Headers.Set("Accept-Language", "tr-TR,tr;q=0.9,en-US;q=0.8")
+		r.Headers.Set("Referer", "https://www.google.com/")
+		fmt.Println("→ Request:", r.URL)
 	})
 
 	c.OnResponse(func(r *colly.Response) {
-		err := os.WriteFile(outputPath, r.Body, 0644)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println("HTML Saved:", outputPath)
+		fmt.Println("← Status:", r.StatusCode)
+		fmt.Println("← Server:", r.Headers.Get("Server"))
+
+		_ = os.WriteFile(outputPath, r.Body, 0644)
+		fmt.Println("HTML saved:", outputPath)
 	})
 
 	c.OnError(func(r *colly.Response, err error) {
-		log.Println("Colly Err:", err)
+		if r != nil {
+			fmt.Println("← Status:", r.StatusCode)
+		}
 	})
 
-	return c.Visit(url)
+	return c.Visit(targetURL)
 }
 
-func takeScreenShot(url string, outputPath string) error {
+func fetchWithChromedp(targetURL, htmlPath, imgPath string, rng *rand.Rand) error {
 
-	start := time.Now()
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", false),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("window-position", "-32000,-32000"),
+		chromedp.Flag("window-size", "1920,1080"),
+	)
 
-	ctx, cancel := chromedp.NewContext(context.Background())
+	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer cancel()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
 	ctx, cancel = context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	var buf []byte
+	var html string
+	var screenshot []byte
 
-	fmt.Println("Taking Screenshot...")
+	fmt.Println("Opening Real Browser, Please Just Wait...")
 
 	err := chromedp.Run(ctx,
-		chromedp.EmulateViewport(1920, 1080),
-		chromedp.Navigate(url),
+		chromedp.Navigate(targetURL),
 		chromedp.WaitReady("body"),
-		chromedp.Sleep(5*time.Second),
-		//chromedp.WaitVisible("body"),
+		chromedp.Sleep(time.Duration(3+rng.Intn(3))*time.Second),
 		chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight);`, nil),
-		chromedp.Sleep(3*time.Second),
-		chromedp.FullScreenshot(&buf, 90),
-		//chromedp.CaptureScreenshot(&buf),
+		chromedp.Sleep(time.Duration(2+rng.Intn(3))*time.Second),
+		chromedp.OuterHTML("html", &html),
+		chromedp.FullScreenshot(&screenshot, 90),
 	)
 	if err != nil {
 		return err
 	}
 
-	err = os.WriteFile(outputPath, buf, 0644)
-	if err != nil {
+	if err := os.WriteFile(htmlPath, []byte(html), 0644); err != nil {
 		return err
 	}
 
-	elapsed := time.Since(start)
-	fmt.Printf("Screenshot Saved: %s (in %s)\n", outputPath, elapsed)
+	if err := os.WriteFile(imgPath, screenshot, 0644); err != nil {
+		return err
+	}
+
+	fmt.Println("Chromedp HTML saved: ", htmlPath)
+	fmt.Println("Screenshot saved: ", imgPath)
+
 	return nil
 }
 
@@ -135,8 +191,7 @@ func createOutputDirectory(targetURL string) (string, string, error) {
 	baseDir := "outputs"
 	fullDir := filepath.Join(baseDir, childDirName)
 
-	err = os.MkdirAll(fullDir, 0755)
-	if err != nil {
+	if err := os.MkdirAll(fullDir, 0755); err != nil {
 		return "", "", err
 	}
 
