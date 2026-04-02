@@ -1,3 +1,4 @@
+# Binaries
 *.exe
 *.exe~
 *.dll
@@ -5,24 +6,32 @@
 *.dylib
 *.test
 *.out
+bin/
 
+# Go workspace
 go.work
 go.work.sum
 
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
+# OS
 .DS_Store
 Thumbs.db
 
+# Logs
 *.log
 
+# Environment
 .env
 .env.*
 
+# Scraper outputs (large files, not tracked)
 outputs/
 
+# PDFs (task specs, not tracked)
 *.pdf

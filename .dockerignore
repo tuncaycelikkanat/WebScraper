@@ -1,0 +1,11 @@
+.git
+outputs/
+bin/
+*.pdf
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*
